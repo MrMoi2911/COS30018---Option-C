@@ -1,281 +1,570 @@
-# File: stock_prediction.py
-# Authors: Bao Vo and Cheong Koo
-# Date: 14/07/2021(v1); 19/07/2021 (v2); 02/07/2024 (v3)
-
-# Code modified from:
-# Title: Predicting Stock Prices with Python
-# Youtuble link: https://www.youtube.com/watch?v=PuZY9q-aKLw
-# By: NeuralNine
-
-# Need to install the following (best in a virtual env):
-# pip install numpy
-# pip install matplotlib
-# pip install pandas
-# pip install tensorflow
-# pip install scikit-learn
-# pip install pandas-datareader
-# pip install yfinance
-
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 #import pandas_datareader as web
 import datetime as dt
 import tensorflow as tf
+import os
+import yfinance as yf
+import mplfinance as mpf
 
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Dropout, LSTM, InputLayer
+from tensorflow.keras.layers import Dense, Dropout, LSTM, GRU, SimpleRNN
+
+
+
+def load_and_process_data(
+    company,
+    start_date,
+    end_date,
+    feature_columns=["Open", "High", "Low", "Close", "Volume"],
+    nan_strategy="drop",
+    split_method="ratio",
+    train_ratio=0.8,
+    split_date=None,
+    scale_features=True,
+    save_local=True,
+    local_dir="data",
+    force_download=False,
+    prediction_days=60,
+):
 
 #------------------------------------------------------------------------------
-# Load Data
-## TO DO:
-# 1) Check if data has been saved before. 
-# If so, load the saved data
-# If not, save the data into a directory
+# Load or Download Data
 #------------------------------------------------------------------------------
-# DATA_SOURCE = "yahoo"
-COMPANY = 'CBA.AX'
+    os.makedirs(local_dir, exist_ok=True)
+    cache_path = os.path.join(local_dir, f"{company}_{start_date}_{end_date}.csv")
 
-TRAIN_START = '2020-01-01'     # Start date to read
-TRAIN_END = '2023-08-01'       # End date to read
-
-# data = web.DataReader(COMPANY, DATA_SOURCE, TRAIN_START, TRAIN_END) # Read data using yahoo
-
-
-import yfinance as yf
-
-# Get the data for the stock AAPL
-data = yf.download(COMPANY,TRAIN_START,TRAIN_END)
+    if not force_download and os.path.exists(cache_path):
+        df = pd.read_csv(cache_path, index_col=0, parse_dates=True)
+    else:
+        df = yf.download(company, start=start_date, end=end_date)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        if save_local:
+            df.to_csv(cache_path)
 
 #------------------------------------------------------------------------------
-# Prepare Data
-## To do:
-# 1) Check if data has been prepared before. 
-# If so, load the saved data
-# If not, save the data into a directory
-# 2) Use a different price value eg. mid-point of Open & Close
-# 3) Change the Prediction days
+# Filter feature columns
 #------------------------------------------------------------------------------
-PRICE_VALUE = "Close"
-
-scaler = MinMaxScaler(feature_range=(0, 1)) 
-# Note that, by default, feature_range=(0, 1). Thus, if you want a different 
-# feature_range (min,max) then you'll need to specify it here
-scaled_data = scaler.fit_transform(data[PRICE_VALUE].values.reshape(-1, 1)) 
-# Flatten and normalise the data
-# First, we reshape a 1D array(n) to 2D array(n,1)
-# We have to do that because sklearn.preprocessing.fit_transform()
-# requires a 2D array
-# Here n == len(scaled_data)
-# Then, we scale the whole array to the range (0,1)
-# The parameter -1 allows (np.)reshape to figure out the array size n automatically 
-# values.reshape(-1, 1) 
-# https://stackoverflow.com/questions/18691084/what-does-1-mean-in-numpy-reshape'
-# When reshaping an array, the new shape must contain the same number of elements 
-# as the old shape, meaning the products of the two shapes' dimensions must be equal. 
-# When using a -1, the dimension corresponding to the -1 will be the product of 
-# the dimensions of the original array divided by the product of the dimensions 
-# given to reshape so as to maintain the same number of elements.
-
-# Number of days to look back to base the prediction
-PREDICTION_DAYS = 60 # Original
-
-# To store the training data
-x_train = []
-y_train = []
-
-scaled_data = scaled_data[:,0] # Turn the 2D array back to a 1D array
-# Prepare the data
-for x in range(PREDICTION_DAYS, len(scaled_data)):
-    x_train.append(scaled_data[x-PREDICTION_DAYS:x])
-    y_train.append(scaled_data[x])
-
-# Convert them into an array
-x_train, y_train = np.array(x_train), np.array(y_train)
-# Now, x_train is a 2D array(p,q) where p = len(scaled_data) - PREDICTION_DAYS
-# and q = PREDICTION_DAYS; while y_train is a 1D array(p)
-
-x_train = np.reshape(x_train, (x_train.shape[0], x_train.shape[1], 1))
-# We now reshape x_train into a 3D array(p, q, 1); Note that x_train 
-# is an array of p inputs with each input being a 2D array 
+    feature_columns = [col for col in feature_columns if col in df.columns]
+    df = df[feature_columns].copy()
 
 #------------------------------------------------------------------------------
-# Build the Model
-## TO DO:
-# 1) Check if data has been built before. 
-# If so, load the saved data
-# If not, save the data into a directory
-# 2) Change the model to increase accuracy?
+# Handle NaN values
 #------------------------------------------------------------------------------
-model = Sequential() # Basic neural network
-# See: https://www.tensorflow.org/api_docs/python/tf/keras/Sequential
-# for some useful examples
+    if nan_strategy == "drop":
+        df.dropna(inplace=True)
+    elif nan_strategy == "fill_ff":
+        df.ffill(inplace=True)
+        df.dropna(inplace=True)
+    elif nan_strategy == "fill_bf":
+        df.bfill(inplace=True)
+        df.dropna(inplace=True)
+    elif nan_strategy == "fill_mean":
+        df.fillna(df.mean(), inplace=True)
 
-model.add(LSTM(units=50, return_sequences=True, input_shape=(x_train.shape[1], 1)))
-# This is our first hidden layer which also spcifies an input layer. 
-# That's why we specify the input shape for this layer; 
-# i.e. the format of each training example
-# The above would be equivalent to the following two lines of code:
-# model.add(InputLayer(input_shape=(x_train.shape[1], 1)))
-# model.add(LSTM(units=50, return_sequences=True))
-# For som eadvances explanation of return_sequences:
-# https://machinelearningmastery.com/return-sequences-and-return-states-for-lstms-in-keras/
-# https://www.dlology.com/blog/how-to-use-return_state-or-return_sequences-in-keras/
-# As explained there, for a stacked LSTM, you must set return_sequences=True 
-# when stacking LSTM layers so that the next LSTM layer has a 
-# three-dimensional sequence input. 
+#------------------------------------------------------------------------------
+# Split into train / test
+#------------------------------------------------------------------------------
+    if split_method == "ratio":
+        split_idx = int(len(df) * train_ratio)
+        train_df = df.iloc[:split_idx]
+        test_df  = df.iloc[split_idx:]
+    elif split_method == "date":
+        train_df = df[df.index < pd.Timestamp(split_date)]
+        test_df  = df[df.index >= pd.Timestamp(split_date)]
+    elif split_method == "random":
+        train_df = df.sample(frac=train_ratio, random_state=42)
+        test_df  = df.drop(train_df.index)
 
-# Finally, units specifies the number of nodes in this layer.
-# This is one of the parameters you want to play with to see what number
-# of units will give you better prediction quality (for your problem)
+#------------------------------------------------------------------------------
+# Scale the features
+#------------------------------------------------------------------------------
+    scalers = {}
+    train_scaled = train_df.copy().astype(float)
+    test_scaled  = test_df.copy().astype(float)
 
-model.add(Dropout(0.2))
-# The Dropout layer randomly sets input units to 0 with a frequency of 
-# rate (= 0.2 above) at each step during training time, which helps 
-# prevent overfitting (one of the major problems of ML). 
+    if scale_features:
+        for col in feature_columns:
+            scaler = MinMaxScaler(feature_range=(0, 1))
+            train_scaled[col] = scaler.fit_transform(
+                train_df[col].values.reshape(-1, 1)
+            ).flatten()
+            test_scaled[col] = scaler.transform(
+                test_df[col].values.reshape(-1, 1)
+            ).flatten()
+            scalers[col] = scaler
 
-model.add(LSTM(units=50, return_sequences=True))
-# More on Stacked LSTM:
-# https://machinelearningmastery.com/stacked-long-short-term-memory-networks/
+#------------------------------------------------------------------------------
+# Create sliding window sequences for LSTM
+#------------------------------------------------------------------------------
+    def create_sequences(scaled_df):
+        X, y = [], []
+        data_arr  = scaled_df.values
+        close_idx = list(scaled_df.columns).index("Close")
+        for i in range(prediction_days, len(data_arr)):
+            X.append(data_arr[i - prediction_days:i])
+            y.append(data_arr[i, close_idx])
+        return np.array(X), np.array(y)
 
-model.add(Dropout(0.2))
-model.add(LSTM(units=50))
-model.add(Dropout(0.2))
+    X_train, y_train = create_sequences(train_scaled)
+    X_test,  y_test  = create_sequences(test_scaled)
 
-model.add(Dense(units=1)) 
-# Prediction of the next closing value of the stock price
+    return {
+        "train_df"        : train_df,
+        "test_df"         : test_df,
+        "X_train"         : X_train,
+        "y_train"         : y_train,
+        "X_test"          : X_test,
+        "y_test"          : y_test,
+        "scalers"         : scalers,
+        "feature_columns" : feature_columns,
+    }
 
-# We compile the model by specify the parameters for the model
-# See lecture Week 6 (COS30018)
-model.compile(optimizer='adam', loss='mean_squared_error')
-# The optimizer and loss are two important parameters when building an 
-# ANN model. Choosing a different optimizer/loss can affect the prediction
-# quality significantly. You should try other settings to learn; e.g.
+def plot_candlestick(df, n=1, title="Candlestick Chart"):
+#------------------------------------------------------------------------------
+# Resample data if n > 1 (group n trading days into 1 candle)
+#------------------------------------------------------------------------------
+    if n > 1:
+        df_resampled = df.resample(f"{n}B").agg({
+            "Open"  : "first",
+            "High"  : "max",
+            "Low"   : "min",
+            "Close" : "last",
+            "Volume": "sum"
+        }).dropna()
+    else:
+        df_resampled = df.copy()
+ 
+#------------------------------------------------------------------------------
+# Plot the candlestick chart
+#------------------------------------------------------------------------------
+    mpf.plot(
+        df_resampled,
+        type            = "candle",
+        style           = "charles",
+        title           = title,
+        ylabel          = "Price (AUD)",
+        volume          = True,
+        mav             = (20, 50),
+        show_nontrading = False,
+    )
+
+def plot_boxplot(df, n=20, title="Boxplot Chart"):
+#------------------------------------------------------------------------------
+# Slice Close prices into non-overlapping windows of size n
+#------------------------------------------------------------------------------
+    close_prices = df["Close"].values
+ 
+    windows, labels = [], []
+    for i in range(0, len(close_prices) - n + 1, n):
+        windows.append(close_prices[i:i+n])
+        labels.append(df.index[i].strftime("%Y-%m-%d"))
+ 
+#------------------------------------------------------------------------------
+# Plot the boxplot
+#------------------------------------------------------------------------------
+    plt.figure(figsize=(14, 6))
+    plt.boxplot(
+        windows,
+        labels       = labels,
+        patch_artist = True,
+        boxprops     = dict(facecolor="lightblue", color="navy"),
+        medianprops  = dict(color="red", linewidth=2),
+        whiskerprops = dict(color="navy"),
+        capprops     = dict(color="navy"),
+        flierprops   = dict(marker="o", color="gray", markersize=3),
+    )
+    plt.xticks(rotation=45, ha="right")
+    plt.title(title)
+    plt.xlabel(f"Window start date (every {n} days)")
+    plt.ylabel("Close Price (AUD)")
+    plt.tight_layout()
+    plt.show()
+
+#------------------------------------------------------------------------------
+# Create function to build the model with configurable parameters
+#------------------------------------------------------------------------------
+def build_model(
+    input_shape,
+    layer_type="LSTM",
+    layer_sizes=[50, 50, 50],
+    dropout_rate=0.2,
+    optimizer="adam",
+    loss="mean_squared_error",
+    output_size=1
+):
+
+#------------------------------------------------------------------------------
+# Map layer type string to the actual Keras layer class
+#------------------------------------------------------------------------------
+    layer_map = {
+        "LSTM"      : LSTM,
+        "GRU"       : GRU,
+        "RNN"       : SimpleRNN,
+    }
+ 
+    if layer_type not in layer_map:
+        raise ValueError(f"layer_type need to be one of: {list(layer_map.keys())}")
+    RecurrentLayer = layer_map[layer_type]
+
+#------------------------------------------------------------------------------
+# Build the Sequential model dynamically
+#------------------------------------------------------------------------------
+    model = Sequential()
+    for i, size in enumerate(layer_sizes):
+        is_first = (i == 0)
+        is_last_recurrent = (i == len(layer_sizes) - 1)
+        if is_first:
+            model.add(RecurrentLayer(
+                units            = size,
+                return_sequences = not is_last_recurrent,
+                input_shape      = input_shape,
+            ))
+        else:
+            model.add(RecurrentLayer(
+                units = size,
+                return_sequences = not is_last_recurrent,
+            ))
+        model.add(Dropout(dropout_rate))
+
+#------------------------------------------------------------------------------
+# Output layer
+#------------------------------------------------------------------------------
+    model.add(Dense(units=output_size))
+    model.compile(optimizer=optimizer, loss=loss)
+    return model
+
+#------------------------------------------------------------------------------
+# Multistep prediction (predict k days into the future)
+#------------------------------------------------------------------------------
+def create_multistep_sequences(scaled_df, prediction_days, future_steps):
+    X, y = [], []
+    data_arr  = scaled_df.values
+    close_idx = list(scaled_df.columns).index("Close")
+    for i in range(prediction_days, len(data_arr) - future_steps + 1):
+        X.append(data_arr[i - prediction_days:i, close_idx])
+        y.append(data_arr[i:i + future_steps, close_idx])
+    X = np.array(X)
+    X = X.reshape(X.shape[0], X.shape[1], 1)
+    return np.array(X), np.array(y)
+
+def predict_multistep(result, future_steps=5, prediction_days=60,
+                      layer_type="LSTM", layer_sizes=[50, 50],
+                      epochs=25, batch_size=32):
+    close_scaler = result["scalers"]["Close"]
+    train_df = result["train_df"].copy().astype(float)
+    test_df  = result["test_df"].copy().astype(float)
+    for col in result["feature_columns"]:
+        scaler = result["scalers"][col]
+        train_df[col] = scaler.transform(train_df[col].values.reshape(-1, 1)).flatten()
+        test_df[col]  = scaler.transform(test_df[col].values.reshape(-1, 1)).flatten()
+ 
+    X_train, y_train = create_multistep_sequences(train_df, prediction_days, future_steps)
+    X_test,  y_test  = create_multistep_sequences(test_df,  prediction_days, future_steps)
+
+    model = build_model(
+        input_shape  = (prediction_days, 1),
+        layer_type   = layer_type,
+        layer_sizes  = layer_sizes,
+        output_size  = future_steps,
+    )
+    model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, verbose=1)
+
+    predicted_scaled = model.predict(X_test)
+
+    predicted_prices = close_scaler.inverse_transform(
+        predicted_scaled.reshape(-1, 1)
+    ).reshape(predicted_scaled.shape)
+
+    actual_prices = close_scaler.inverse_transform(
+        y_test.reshape(-1, 1)
+    ).reshape(y_test.shape)
+
+    plt.figure(figsize=(14, 5))
+    plt.plot(actual_prices.flatten(),    color="black", label="Actual")
+    plt.plot(predicted_prices.flatten(), color="green", label=f"Predicted ({future_steps}-step)")
+    plt.title(f"Multistep Prediction — {future_steps} days ahead")
+    plt.xlabel("Time steps")
+    plt.ylabel("Close Price (AUD)")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    last_window = X_test[-1:]
+    next_k = model.predict(last_window)
+    next_k = close_scaler.inverse_transform(next_k.reshape(-1, 1)).flatten()
+    print(f"\nMultistep — next {future_steps} days prediction: {np.round(next_k, 4)}")
+
+    return model
+
+#------------------------------------------------------------------------------
+# Multivariate prediction
+#------------------------------------------------------------------------------
+def predict_multivariate(result, target_day=1, prediction_days=60,
+                         layer_type="LSTM", layer_sizes=[50, 50],
+                         epochs=25, batch_size=32):
+    close_scaler = result["scalers"]["Close"]
+    n_features   = result["X_train"].shape[2]
+    train_df = result["train_df"].copy().astype(float)
+    test_df  = result["test_df"].copy().astype(float)
+
+    for col in result["feature_columns"]:
+        scaler = result["scalers"][col]
+        train_df[col] = scaler.transform(train_df[col].values.reshape(-1, 1)).flatten()
+        test_df[col]  = scaler.transform(test_df[col].values.reshape(-1, 1)).flatten()
+
+    def create_multivariate_sequences(scaled_df):
+            X, y = [], []
+            data_arr  = scaled_df.values
+            close_idx = list(scaled_df.columns).index("Close")
+            for i in range(prediction_days, len(data_arr) - target_day + 1):
+                X.append(data_arr[i - prediction_days:i])
+                y.append(data_arr[i + target_day - 1, close_idx])
+            return np.array(X), np.array(y)
+
+    X_train, y_train = create_multivariate_sequences(train_df)
+    X_test,  y_test  = create_multivariate_sequences(test_df)
+
+    model = build_model(
+        input_shape  = (prediction_days, n_features),
+        layer_type   = layer_type,
+        layer_sizes  = layer_sizes,
+        output_size  = 1,
+    )
+    model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, verbose=1)
     
-# optimizer='rmsprop'/'sgd'/'adadelta'/...
-# loss='mean_absolute_error'/'huber_loss'/'cosine_similarity'/...
-
-# Now we are going to train this model with our training data 
-# (x_train, y_train)
-model.fit(x_train, y_train, epochs=25, batch_size=32)
-# Other parameters to consider: How many rounds(epochs) are we going to 
-# train our model? Typically, the more the better, but be careful about
-# overfitting!
-# What about batch_size? Well, again, please refer to 
-# Lecture Week 6 (COS30018): If you update your model for each and every 
-# input sample, then there are potentially 2 issues: 1. If you training 
-# data is very big (billions of input samples) then it will take VERY long;
-# 2. Each and every input can immediately makes changes to your model
-# (a souce of overfitting). Thus, we do this in batches: We'll look at
-# the aggreated errors/losses from a batch of, say, 32 input samples
-# and update our model based on this aggregated loss.
-
-# TO DO:
-# Save the model and reload it
-# Sometimes, it takes a lot of effort to train your model (again, look at
-# a training data with billions of input samples). Thus, after spending so 
-# much computing power to train your model, you may want to save it so that
-# in the future, when you want to make the prediction, you only need to load
-# your pre-trained model and run it on the new input for which the prediction
-# need to be made.
+    predicted_scaled = model.predict(X_test)
+    predicted_prices = close_scaler.inverse_transform(predicted_scaled)
+    actual_prices    = close_scaler.inverse_transform(y_test.reshape(-1, 1))
+    
+    plt.figure(figsize=(14, 5))
+    plt.plot(actual_prices,    color="black", label="Actual")
+    plt.plot(predicted_prices, color="blue",  label=f"Predicted (day +{target_day})")
+    plt.title(f"Multivariate Prediction — target day +{target_day}")
+    plt.xlabel("Time")
+    plt.ylabel("Close Price (AUD)")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+    
+    last_window = X_test[-1:]
+    next_pred   = model.predict(last_window)
+    next_pred   = close_scaler.inverse_transform(next_pred)
+    print(f"\nMultivariate — day +{target_day} prediction: {next_pred[0][0]:.4f}")
+    
+    return model
 
 #------------------------------------------------------------------------------
-# Test the model accuracy on existing data
+# Multivariate + Multistep
 #------------------------------------------------------------------------------
-# Load the test data
-TEST_START = '2023-08-02'
-TEST_END = '2024-07-02'
+def predict_multivariate_multistep(result, future_steps=5, prediction_days=60,
+                                   layer_type="LSTM", layer_sizes=[50, 50],
+                                   epochs=25, batch_size=32):
+    close_scaler = result["scalers"]["Close"]
+    n_features   = result["X_train"].shape[2]
+    train_df = result["train_df"].copy().astype(float)
+    test_df  = result["test_df"].copy().astype(float)
 
-# test_data = web.DataReader(COMPANY, DATA_SOURCE, TEST_START, TEST_END)
+    for col in result["feature_columns"]:
+        scaler = result["scalers"][col]
+        train_df[col] = scaler.transform(train_df[col].values.reshape(-1, 1)).flatten()
+        test_df[col]  = scaler.transform(test_df[col].values.reshape(-1, 1)).flatten()
 
-test_data = yf.download(COMPANY,TEST_START,TEST_END)
+    X_train, y_train = create_multistep_sequences(train_df, prediction_days, future_steps)
+    X_test,  y_test  = create_multistep_sequences(test_df,  prediction_days, future_steps)
+ 
+    model = build_model(
+        input_shape  = (prediction_days, n_features),
+        layer_type   = layer_type,
+        layer_sizes  = layer_sizes,
+        output_size  = future_steps,
+    )
+    model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, verbose=1)
+ 
+    predicted_scaled = model.predict(X_test)
+    predicted_prices = close_scaler.inverse_transform(
+        predicted_scaled.reshape(-1, 1)
+    ).reshape(predicted_scaled.shape)
+    actual_prices = close_scaler.inverse_transform(
+        y_test.reshape(-1, 1)
+    ).reshape(y_test.shape)
 
+    plt.figure(figsize=(14, 5))
+    plt.plot(actual_prices.flatten(),    color="black",  label="Actual")
+    plt.plot(predicted_prices.flatten(), color="purple", label=f"Predicted ({future_steps}-step multivariate)")
+    plt.title(f"Multivariate + Multistep Prediction — {future_steps} days ahead")
+    plt.xlabel("Time steps")
+    plt.ylabel("Close Price (AUD)")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
 
-# The above bug is the reason for the following line of code
-# test_data = test_data[1:]
-
-actual_prices = test_data[PRICE_VALUE].values
-
-total_dataset = pd.concat((data[PRICE_VALUE], test_data[PRICE_VALUE]), axis=0)
-
-model_inputs = total_dataset[len(total_dataset) - len(test_data) - PREDICTION_DAYS:].values
-# We need to do the above because to predict the closing price of the fisrt
-# PREDICTION_DAYS of the test period [TEST_START, TEST_END], we'll need the 
-# data from the training period
-
-model_inputs = model_inputs.reshape(-1, 1)
-# TO DO: Explain the above line
-
-model_inputs = scaler.transform(model_inputs)
-# We again normalize our closing price data to fit them into the range (0,1)
-# using the same scaler used above 
-# However, there may be a problem: scaler was computed on the basis of
-# the Max/Min of the stock price for the period [TRAIN_START, TRAIN_END],
-# but there may be a lower/higher price during the test period 
-# [TEST_START, TEST_END]. That can lead to out-of-bound values (negative and
-# greater than one)
-# We'll call this ISSUE #2
-
-# TO DO: Generally, there is a better way to process the data so that we 
-# can use part of it for training and the rest for testing. You need to 
-# implement such a way
+    last_window = X_test[-1:]
+    next_k = model.predict(last_window)
+    next_k = close_scaler.inverse_transform(next_k.reshape(-1, 1)).flatten()
+    print(f"\nMultivariate+Multistep — next {future_steps} days: {np.round(next_k, 4)}")
+ 
+    return model
 
 #------------------------------------------------------------------------------
-# Make predictions on test data
+# Main
 #------------------------------------------------------------------------------
-x_test = []
-for x in range(PREDICTION_DAYS, len(model_inputs)):
-    x_test.append(model_inputs[x - PREDICTION_DAYS:x, 0])
+COMPANY    = "CBA.AX"
+START_DATE = "2020-01-01"
+END_DATE   = "2024-07-02"
+PREDICTION_DAYS = 60
 
-x_test = np.array(x_test)
-x_test = np.reshape(x_test, (x_test.shape[0], x_test.shape[1], 1))
-# TO DO: Explain the above 5 lines
+result = load_and_process_data(
+    company         = COMPANY,
+    start_date      = START_DATE,
+    end_date        = END_DATE,
+    nan_strategy    = "fill_ff",
+    split_method    = "ratio",
+    train_ratio     = 0.8,
+    scale_features  = True,
+    save_local      = True,
+    prediction_days = PREDICTION_DAYS,
+)
 
-predicted_prices = model.predict(x_test)
-predicted_prices = scaler.inverse_transform(predicted_prices)
-# Clearly, as we transform our data into the normalized range (0,1),
-# we now need to reverse this transformation 
+# Plot additional charts
+plot_candlestick(result["train_df"], n=5, title="Candlestick Chart")
+
+plot_boxplot(result["train_df"], n=20, title="Boxplot Chart")
+
+X_train      = result["X_train"]
+y_train      = result["y_train"]
+X_test       = result["X_test"]
+y_test       = result["y_test"]
+close_scaler = result["scalers"]["Close"]
+n_features   = X_train.shape[2]
+
+input_shape = (PREDICTION_DAYS, n_features)
+
 #------------------------------------------------------------------------------
-# Plot the test predictions
-## To do:
-# 1) Candle stick charts
-# 2) Chart showing High & Lows of the day
-# 3) Show chart of next few days (predicted)
+# Experiment with different model configurations
 #------------------------------------------------------------------------------
+configs = [
+    {
+        "name"        : "LSTM_3layer_50",
+        "layer_type"  : "LSTM",
+        "layer_sizes" : [50, 50, 50],
+        "dropout_rate": 0.2,
+        "optimizer"   : "adam",
+        "epochs"      : 25,
+        "batch_size"  : 32,
+    },
+    {
+        "name"        : "GRU_2layer_64",
+        "layer_type"  : "GRU",
+        "layer_sizes" : [64, 64],
+        "dropout_rate": 0.3,
+        "optimizer"   : "adam",
+        "epochs"      : 25,
+        "batch_size"  : 32,
+    },
+    {
+        "name"        : "RNN_2layer_32",
+        "layer_type"  : "RNN",
+        "layer_sizes" : [32, 32],
+        "dropout_rate": 0.2,
+        "optimizer"   : "rmsprop",
+        "epochs"      : 25,
+        "batch_size"  : 64,
+    },
+]
 
-plt.plot(actual_prices, color="black", label=f"Actual {COMPANY} Price")
-plt.plot(predicted_prices, color="green", label=f"Predicted {COMPANY} Price")
-plt.title(f"{COMPANY} Share Price")
-plt.xlabel("Time")
-plt.ylabel(f"{COMPANY} Share Price")
-plt.legend()
-plt.show()
+for cfg in configs:
+    print(f"\n{'='*60}")
+    print(f"Training: {cfg['name']}")
+    print(f"{'='*60}")
+
+    model = build_model(
+        input_shape  = input_shape,
+        layer_type   = cfg["layer_type"],
+        layer_sizes  = cfg["layer_sizes"],
+        dropout_rate = cfg["dropout_rate"],
+        optimizer    = cfg["optimizer"]
+    )
+
+#------------------------------------------------------------------------------
+# Traning the model
+#------------------------------------------------------------------------------
+    model.fit(
+            X_train, y_train,
+            epochs     = cfg["epochs"],
+            batch_size = cfg["batch_size"],
+            verbose    = 1,
+        )
+
+#------------------------------------------------------------------------------
+# Testing the model
+#------------------------------------------------------------------------------
+    predicted_prices = model.predict(X_test)
+    predicted_prices = close_scaler.inverse_transform(predicted_prices)
+    actual_prices    = close_scaler.inverse_transform(y_test.reshape(-1, 1))
+
+#------------------------------------------------------------------------------
+# Visualise the results
+#------------------------------------------------------------------------------
+    plt.figure(figsize=(14, 5))
+    plt.plot(actual_prices,    color="black", label=f"Actual {COMPANY} Price")
+    plt.plot(predicted_prices, color="green", label=f"Predicted — {cfg['name']}")
+    plt.title(f"{COMPANY} — {cfg['name']}")
+    plt.xlabel("Time")
+    plt.ylabel("Price (AUD)")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
 
 #------------------------------------------------------------------------------
 # Predict next day
 #------------------------------------------------------------------------------
+    last_window = X_test[-1:]  # shape: (1, 60, n_features)
+    prediction  = model.predict(last_window)
+    prediction  = close_scaler.inverse_transform(prediction)
+    print(f"Prediction: {prediction}")
 
-
-real_data = [model_inputs[len(model_inputs) - PREDICTION_DAYS:, 0]]
-real_data = np.array(real_data)
-real_data = np.reshape(real_data, (real_data.shape[0], real_data.shape[1], 1))
-
-prediction = model.predict(real_data)
-prediction = scaler.inverse_transform(prediction)
-print(f"Prediction: {prediction}")
-
-# A few concluding remarks here:
-# 1. The predictor is quite bad, especially if you look at the next day 
-# prediction, it missed the actual price by about 10%-13%
-# Can you find the reason?
-# 2. The code base at
-# https://github.com/x4nth055/pythoncode-tutorials/tree/master/machine-learning/stock-prediction
-# gives a much better prediction. Even though on the surface, it didn't seem 
-# to be a big difference (both use Stacked LSTM)
-# Again, can you explain it?
-# A more advanced and quite different technique use CNN to analyse the images
-# of the stock price changes to detect some patterns with the trend of
-# the stock price:
-# https://github.com/jason887/Using-Deep-Learning-Neural-Networks-and-Candlestick-Chart-Representation-to-Predict-Stock-Market
-# Can you combine these different techniques for a better prediction??
+#------------------------------------------------------------------------------
+# Multistep, Multivariate, and Combined predictions
+#------------------------------------------------------------------------------
+print("\n" + "="*60)
+print("Multistep Prediction (5 days ahead)")
+print("="*60)
+predict_multistep(
+    result          = result,
+    future_steps    = 5,
+    prediction_days = PREDICTION_DAYS,
+    layer_type      = "LSTM",
+    layer_sizes     = [50, 50],
+    epochs          = 25,
+    batch_size      = 32,
+)
+ 
+print("\n" + "="*60)
+print("Multivariate Prediction (day +3)")
+print("="*60)
+predict_multivariate(
+    result          = result,
+    target_day      = 3,
+    prediction_days = PREDICTION_DAYS,
+    layer_type      = "LSTM",
+    layer_sizes     = [50, 50],
+    epochs          = 25,
+    batch_size      = 32,
+)
+ 
+print("\n" + "="*60)
+print("Multivariate + Multistep (5 days ahead)")
+print("="*60)
+predict_multivariate_multistep(
+    result          = result,
+    future_steps    = 5,
+    prediction_days = PREDICTION_DAYS,
+    layer_type      = "LSTM",
+    layer_sizes     = [50, 50],
+    epochs          = 25,
+    batch_size      = 32,
+)
